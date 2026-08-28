@@ -1,0 +1,147 @@
+
+  1. Boot — three threads, one queue
+
+  app_main()                                       main.c:281
+    │
+    ├─ nvs_init()  settings_init()  ──► hold_s loaded from NVS
+    ├─ xQueueCreate(s_events)          ◄── the only cross-thread channel
+    ├─ timer_create x3                 hold / heartbeat / reset-hold
+    ├─ board_io_init(s_events)         pads + ISRs + GPIO wake armed
+    ├─ battery_init()                  ADC1 + curve-fitting cali
+    ├─ esp_pm_configure(light_sleep)   ◄── without this, no sleep happens
+    ├─ zb_sensor_start()  ──► spawns "zigbee" task (prio 5)
+    └─ xTaskCreate(app_task)  ──────────► "app" task     (prio 4)
+
+                app_main returns; three tasks remain:
+
+     [zigbee]  esp_zb_stack_main_loop()      ← radio, ZCL, signals
+     [app]     xQueueReceive(portMAX_DELAY)  ← all application state
+     [esp_timer] dispatches the 3 alarms
+
+  2. Join — and the point where the app comes alive
+
+  zb_task                          esp_zb_app_signal_handler()
+  zb_sensor.c:301
+   esp_zb_sleep_enable(true)   ┌──► SKIP_STARTUP ──► BDB_INITIALIZATION
+   esp_zb_init()               │         │
+   esp_zb_start(false) ────────┘         ▼
+                                DEVICE_FIRST_START / DEVICE_REBOOT
+                                         │
+                          factory-new?  ─┴─  already joined
+                                │                   │
+                                ▼                   │
+                            STEERING ───ok──────────┤
+                                │ fail              ▼
+                                └─retry 1s   announce_joined()
+                                                    │
+                                      post APP_EVT_ZB_JOINED
+                                                    ▼
+                                     [app] handle_joined()      main.c:212
+                                       • report battery (% + volts)
+                                       • report hold setpoint
+                                       • report current occupancy
+                                       • start 1 h heartbeat timer
+
+  3. Steady state — the sleep/wake cycle
+
+  This is the part that replaced deep sleep.
+
+          ┌──────────────────────────────────────────────┐
+          │  all three tasks blocked, nothing to do      │
+          └──────────────────────┬───────────────────────┘
+                                 │ stack raises
+                                 ▼
+                    ESP_ZB_COMMON_SIGNAL_CAN_SLEEP
+                                 │
+                       esp_zb_sleep_now()          ← drops the stack PM lock
+                                 │
+                     FreeRTOS tickless idle
+                                 │
+                                 ▼
+                     ╔═══════════════════════╗
+                     ║  AUTOMATIC LIGHT SLEEP ║   RAM kept, radio kept,
+                     ║   ~40 MHz / CPU down   ║   network join kept
+                     ╚═══════════╤═══════════╝
+                                 │
+          ┌──────────────────────┼──────────────────────┐
+          │                      │                      │
+     GPIO level             esp_timer alarm       stack poll timer
+     (PIR / button)      (hold / heartbeat)       (parent, ~3 s)
+          │                      │                      │
+          └──────────────────────┴──────────────────────┘
+                                 │
+                            wake, handle, ──────► back to sleep
+
+  Contrast with the sketch: that path was esp_deep_sleep_start() → RAM gone →
+  reboot → radio init → rejoin → then report.
+
+  4. A motion event, end to end
+
+   PIR line   ‾‾‾‾‾‾‾╲___________╱‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+                     ▼           ▼
+   wake armed  on LOW      on HIGH               on LOW
+                     │           │
+   [ISR]       intr_disable  intr_disable        board_io.c:47
+               queue(PIR,1)  queue(PIR,0)
+                     │           │
+   [app]      handle_pir_changed(true)   handle_pir_changed(false)
+               rearm → watch HIGH         rearm → watch LOW
+               set_occupancy(true)        (no state change)
+                 LED on                    ↑ hold measured from the
+                 ZCL report ──► z2m          *trailing* edge
+               extend_hold()              extend_hold()
+                     │                         │
+                     └── sleep ────────────────┴── sleep ───┐
+                                                            │
+                                hold_s elapsed, no new motion▼
+                                          handle_hold_expired()   main.c:130
+                                            motion still asserted?
+                                              yes & < 180 s → extend
+                                              else → set_occupancy(false)
+                                                      LED off, report clear
+
+  The level-follower underneath it — the reason edges are never lost across a
+  sleep:
+
+     arm LOW ──► [ idle, line HIGH ] ──LOW──► ISR ──► app rearms
+                         ▲                                │
+                         │                                ▼
+                     ISR ◄──HIGH── [ asserted, line LOW ] ◄── arm HIGH
+
+  An edge during sleep would be lost (GPIO clock is off); a level is still there
+  when the ISR finally runs. That is why both the wake source and the interrupt
+  are level-triggered, always armed for the level the pin does not currently
+  have.
+
+  5. The two side channels
+
+  CONFIG WRITE                          BUTTON / FACTORY RESET
+  ────────────                          ──────────────────────
+  z2m writes genAnalogOutput            press (LOW)
+        │ .presentValue, EP 12                │ ISR → queue(BUTTON,1)
+        ▼                                     ▼
+  parent router buffers it              start 5 s reset timer
+        │                                     │
+        │ device polls (~3 s)           release? → stop timer
+        ▼                                     │ still held at 5 s
+  stack applies attribute                     ▼
+        │                               RESET_HOLD_ELAPSED
+        ▼ SET_ATTR_VALUE_CB_ID          blink 5x, esp_zb_factory_reset()
+  on_set_attribute()  zb_sensor.c:246   → erase datasets → reboot to pair
+        │ post APP_EVT_ZB_HOLD_SETPOINT
+        ▼
+  handle_hold_setpoint()      main.c:236
+    clamp 1..3600
+    settings_set_hold_s()  → NVS only if changed
+    report echo            → z2m shows accepted value
+    extend_hold() if currently occupied
+
+  HEARTBEAT: periodic 1 h → APP_EVT_HEARTBEAT → report_battery()
+             ADC x8 averaged → % on EP 10, volts on EP 11
+
+  The invariant that keeps this simple: only app_task mutates application state.
+  ISRs, esp_timer callbacks and the Zigbee stack task are all pure producers
+  into s_events, so there is no lock anywhere in the application — the only lock
+  is esp_zb_lock_acquire() around stack calls.
+
+✻ Crunched for 59s · done 2:58 PM

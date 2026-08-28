@@ -1,0 +1,13 @@
+## Managed components pulled from https://components.espressif.com
+##
+## Pinned to the 1.6.x line on purpose: it is the last series that exposes the
+## esp_zb_sleep_*() API (esp_zb_sleep_enable / esp_zb_sleep_now) used by
+## zb_sensor.c. In esp-zigbee-lib 2.x those calls became no-op compatibility
+## macros, so bumping the major version silently disables Zigbee light sleep.
+dependencies:
+  idf:
+    version: ">=5.0"
+  espressif/esp-zigbee-lib:
+    version: "~1.6.8"
+  espressif/esp-zboss-lib:
+    version: "~1.6.4"

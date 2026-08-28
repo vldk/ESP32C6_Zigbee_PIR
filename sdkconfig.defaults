@@ -1,0 +1,59 @@
+# =============================================================================
+#  ESP32-C6 Zigbee PIR presence sensor - project defaults
+#  Delete sdkconfig.seeed_xiao_esp32c6 after editing this file: ESP-IDF only
+#  applies defaults when it generates a fresh sdkconfig.
+# =============================================================================
+
+CONFIG_IDF_TARGET="esp32c6"
+
+# --- Zigbee stack --------------------------------------------------------
+# ZED + native radio is what the prebuilt libesp_zb_api.ed.a expects; picking
+# ZCZR here silently links the wrong archive.
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
+CONFIG_ZB_RADIO_NATIVE=y
+
+# --- Partition table -----------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# --- Power management: this is what makes esp_zb_sleep_now() actually sleep --
+# esp_zb_sleep_now() only releases the stack's PM lock. Without PM_ENABLE +
+# tickless idle the CPU would just spin in the idle task instead of light
+# sleeping, so these three are mandatory, not optional tuning.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+CONFIG_PM_SLP_IRAM_OPT=y
+CONFIG_PM_RTOS_IDLE_OPT=y
+CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=y
+CONFIG_ESP_SLEEP_POWER_DOWN_FLASH=y
+
+# Deliberately OFF. Powering the HP peripherals down would take the GPIO block
+# with them, and esp_sleep_enable_gpio_wakeup() (the per-pin, per-level wake
+# board_io.c relies on to follow the PIR line) is unavailable in that mode.
+CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP=n
+
+# Power the radio/PHY down while light sleeping - without these two the 15.4
+# radio keeps drawing full receive current and the sleep buys nothing.
+CONFIG_ESP_PHY_MAC_BB_PD=y
+CONFIG_IEEE802154_SLEEP_ENABLE=y
+
+# 80 MHz is plenty for a sensor and halves the active-mode current; PM scales
+# down to the XTAL between events anyway.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+
+# --- Console -------------------------------------------------------------
+# The XIAO ESP32-C6 exposes only USB, so logs go over USB-Serial-JTAG. Note
+# that an attached host keeps that peripheral (and therefore some current)
+# alive; set CONFIG_LOG_DEFAULT_LEVEL_NONE for battery measurements.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+
+# --- Misc ----------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_TASK_WDT_INIT=n
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

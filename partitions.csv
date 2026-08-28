@@ -1,0 +1,9 @@
+# Zigbee end device, 4 MB flash.
+# zb_storage holds the network/binding datasets (this is what "factory reset"
+# wipes); zb_fct is the factory (production) partition the stack expects to exist.
+# Name,     Type, SubType,  Offset,   Size,   Flags
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xf000,   0x1000,
+factory,    app,  factory,  0x10000,  1500K,
+zb_storage, data, fat,      ,         16K,
+zb_fct,     data, fat,      ,         1K,

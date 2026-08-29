@@ -58,10 +58,10 @@
                      FreeRTOS tickless idle
                                  │
                                  ▼
-                     ╔═══════════════════════╗
+                     ╔════════════════════════╗
                      ║  AUTOMATIC LIGHT SLEEP ║   RAM kept, radio kept,
                      ║   ~40 MHz / CPU down   ║   network join kept
-                     ╚═══════════╤═══════════╝
+                     ╚═══════════╤════════════╝
                                  │
           ┌──────────────────────┼──────────────────────┐
           │                      │                      │
@@ -143,5 +143,3 @@
   ISRs, esp_timer callbacks and the Zigbee stack task are all pure producers
   into s_events, so there is no lock anywhere in the application — the only lock
   is esp_zb_lock_acquire() around stack calls.
-
-✻ Crunched for 59s · done 2:58 PM

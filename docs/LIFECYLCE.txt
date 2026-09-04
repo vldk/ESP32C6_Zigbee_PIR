@@ -5,7 +5,8 @@
     │
     ├─ nvs_init()  settings_init()  ──► hold_s loaded from NVS
     ├─ xQueueCreate(s_events)          ◄── the only cross-thread channel
-    ├─ timer_create x3                 hold / heartbeat / reset-hold
+    ├─ timer_create x4                 hold / supervise / heartbeat / reset-hold
+    ├─ start supervise timer           periodic, OCCUPANCY_SUPERVISE_S
     ├─ board_io_init(s_events)         pads + ISRs + GPIO wake armed
     ├─ battery_init()                  ADC1 + curve-fitting cali
     ├─ esp_pm_configure(light_sleep)   ◄── without this, no sleep happens
@@ -16,7 +17,7 @@
 
      [zigbee]  esp_zb_stack_main_loop()      ← radio, ZCL, signals
      [app]     xQueueReceive(portMAX_DELAY)  ← all application state
-     [esp_timer] dispatches the 3 alarms
+     [esp_timer] dispatches the 4 alarms
 
   2. Join — and the point where the app comes alive
 
@@ -66,7 +67,7 @@
           ┌──────────────────────┼──────────────────────┐
           │                      │                      │
      GPIO level             esp_timer alarm       stack poll timer
-     (PIR / button)      (hold / heartbeat)       (parent, ~3 s)
+     (PIR / button)   (hold/supervise/heartbeat)  (parent, ~3 s)
           │                      │                      │
           └──────────────────────┴──────────────────────┘
                                  │
@@ -113,7 +114,35 @@
   are level-triggered, always armed for the level the pin does not currently
   have.
 
-  5. The two side channels
+  5. Supervision — reconciling the two copies of the occupancy state
+
+  set_occupancy() dedupes, so each transition is transmitted exactly once. If
+  that one report does not leave the device, the coordinator is wrong until the
+  next real transition — measured at 47 minutes on 2026-09-04 against a 3 s
+  hold, with the device joined and reachable the whole time.
+
+  APP_EVT_SUPERVISE fires every OCCUPANCY_SUPERVISE_S and closes both holes:
+
+      handle_supervise()                                   main.c
+        │
+        ├─ occupied longer than OCCUPANCY_MAX_HOLD_S?
+        │     → stop hold timer, set_occupancy(false)
+        │     covers: the hold timer never fired at all. handle_hold_expired()
+        │     enforces the same ceiling but only when it runs, which is the
+        │     assumption that fails here — hence a separate alarm.
+        │
+        └─ s_occupancy_unreported?
+              → publish_occupancy() again
+              covers: the report was generated but never transmitted.
+
+  The flag is set by publish_occupancy(), the single point every occupancy
+  report goes through. zb_sensor.c feeds it honestly: a report skipped because
+  the device is not joined now returns ESP_ERR_INVALID_STATE, not ESP_OK.
+
+  Cost: one esp_timer alarm per 30 s, no radio traffic unless something is
+  actually wrong. The stack already wakes the SoC every ~3 s to poll its parent.
+
+  6. The two side channels
 
   CONFIG WRITE                          BUTTON / FACTORY RESET
   ────────────                          ──────────────────────
@@ -138,6 +167,9 @@
 
   HEARTBEAT: periodic 1 h → APP_EVT_HEARTBEAT → report_battery()
              ADC x8 averaged → % on EP 10, volts on EP 11
+             then publish_occupancy() — an unconditional re-publish that
+             bypasses the set_occupancy() dedupe, so a coordinator that
+             missed a transition is corrected within one heartbeat.
 
   The invariant that keeps this simple: only app_task mutates application state.
   ISRs, esp_timer callbacks and the Zigbee stack task are all pure producers

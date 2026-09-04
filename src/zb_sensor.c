@@ -85,7 +85,14 @@ static esp_err_t set_and_report(uint8_t endpoint, uint16_t cluster_id, uint16_t 
         ESP_LOGE(TAG, "%s: cannot set ep%u cluster 0x%04x attr 0x%04x (zcl status %d)",
                  what, endpoint, cluster_id, attr_id, status);
         err = ESP_FAIL;
-    } else if (s_joined) {
+    } else if (!s_joined) {
+        /* The local attribute is up to date but nothing left the radio. This
+         * used to return ESP_OK, which made a silently skipped report
+         * indistinguishable from a delivered one - the caller had no way to
+         * know it needed to try again once we rejoined. */
+        ESP_LOGW(TAG, "%s: not joined, report skipped", what);
+        err = ESP_ERR_INVALID_STATE;
+    } else {
         err = report_attribute(endpoint, cluster_id, attr_id);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "%s: report failed: %s", what, esp_err_to_name(err));

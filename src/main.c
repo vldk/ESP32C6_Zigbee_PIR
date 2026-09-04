@@ -55,11 +55,16 @@ static const char *TAG = "app";
 
 static QueueHandle_t     s_events;
 static esp_timer_handle_t s_hold_timer;       /* occupancy stay-on          */
+static esp_timer_handle_t s_supervise_timer;  /* occupancy state supervisor */
 static esp_timer_handle_t s_heartbeat_timer;  /* periodic battery report    */
 static esp_timer_handle_t s_reset_timer;      /* button held long enough    */
 
 static bool    s_occupied;
 static int64_t s_occupied_since_us;
+/* Set when an occupancy report did not make it out. The coordinator is the only
+ * place this state is visible to anyone, so a dropped report has to be retried
+ * rather than logged and forgotten - see handle_supervise(). */
+static bool    s_occupancy_unreported;
 
 /* ------------------------------------------------------------------ timers */
 
@@ -99,9 +104,30 @@ static void timer_restart_once(esp_timer_handle_t timer, uint64_t timeout_us)
 
 /* -------------------------------------------------------------- occupancy */
 
+/* The single point every occupancy report goes through, so that a failure is
+ * remembered instead of merely logged. Local state is committed first on
+ * purpose: the LED and the hold logic must reflect the sensor even when the
+ * radio is unavailable. It is the coordinator that then has to catch up. */
+static void publish_occupancy(void)
+{
+    const esp_err_t err = zb_sensor_report_occupancy(s_occupied);
+    s_occupancy_unreported = (err != ESP_OK);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "occupancy report failed (%s), retrying within %u s",
+                 esp_err_to_name(err), (unsigned)OCCUPANCY_SUPERVISE_S);
+    }
+}
+
 static void set_occupancy(bool occupied)
 {
     if (s_occupied == occupied) {
+        /* Deduplicated, but never silently: if the last attempt for this very
+         * value failed, the coordinator still disagrees with us and this is a
+         * free chance to fix that. */
+        if (s_occupancy_unreported) {
+            publish_occupancy();
+        }
         return;
     }
     s_occupied = occupied;
@@ -112,10 +138,7 @@ static void set_occupancy(bool occupied)
     board_io_led_set(occupied);
     ESP_LOGI(TAG, "occupancy -> %s", occupied ? "occupied" : "clear");
 
-    const esp_err_t err = zb_sensor_report_occupancy(occupied);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "occupancy report failed: %s", esp_err_to_name(err));
-    }
+    publish_occupancy();
 }
 
 static void extend_hold(void)
@@ -135,6 +158,12 @@ static void handle_pir_changed(bool motion)
     extend_hold();
 }
 
+static bool occupancy_outlived_max_hold(void)
+{
+    return (esp_timer_get_time() - s_occupied_since_us) >=
+           (int64_t)OCCUPANCY_MAX_HOLD_S * 1000000LL;
+}
+
 static void handle_hold_expired(void)
 {
     if (!s_occupied) {
@@ -142,8 +171,7 @@ static void handle_hold_expired(void)
     }
 
     if (board_io_motion_active()) {
-        const int64_t held_us = esp_timer_get_time() - s_occupied_since_us;
-        if (held_us < (int64_t)OCCUPANCY_MAX_HOLD_S * 1000000LL) {
+        if (!occupancy_outlived_max_hold()) {
             extend_hold();
             return;
         }
@@ -155,6 +183,33 @@ static void handle_hold_expired(void)
     }
 
     set_occupancy(false);
+}
+
+/*
+ * Runs on a fixed cadence and reconciles the two things the hold timer cannot
+ * fix, because in both of them the hold timer is the part that failed.
+ */
+static void handle_supervise(void)
+{
+    /* (1) Occupancy that outlived every legitimate hold. handle_hold_expired()
+     * enforces the same ceiling, but only if the hold timer actually fires -
+     * which is precisely what cannot be assumed when the state is stuck. A
+     * guard living inside the mechanism it guards is not a safety net; this
+     * separate alarm is. */
+    if (s_occupied && occupancy_outlived_max_hold()) {
+        ESP_LOGW(TAG, "occupied for over %u s with no hold expiry, forcing clear",
+                 (unsigned)OCCUPANCY_MAX_HOLD_S);
+        esp_timer_stop(s_hold_timer);
+        set_occupancy(false);
+        return;   /* set_occupancy() has just reported; nothing left to retry */
+    }
+
+    /* (2) A state the coordinator was never successfully told about. */
+    if (s_occupancy_unreported) {
+        ESP_LOGW(TAG, "re-sending unreported occupancy state (%s)",
+                 s_occupied ? "occupied" : "clear");
+        publish_occupancy();
+    }
 }
 
 /* ----------------------------------------------------------------- button */
@@ -214,7 +269,7 @@ static void handle_joined(void)
 
     /* Publish the current state so the coordinator is not left guessing after
      * a rejoin, then start the keepalive/battery cadence. */
-    zb_sensor_report_occupancy(s_occupied);
+    publish_occupancy();
 
     esp_timer_stop(s_heartbeat_timer);
     const esp_err_t timer_err =
@@ -276,8 +331,18 @@ static void app_task(void *arg)
         case APP_EVT_RESET_HOLD_ELAPSED:
             handle_reset_hold_elapsed();
             break;
+        case APP_EVT_SUPERVISE:
+            handle_supervise();
+            break;
         case APP_EVT_HEARTBEAT:
             report_battery();
+            /* Unconditional occupancy re-publish, bypassing the set_occupancy()
+             * dedupe. The deep-sleep sketch this replaced got this for free -
+             * it re-reported occupancy on every single wake - and losing it is
+             * what let a desync survive indefinitely instead of at most one
+             * heartbeat. This is the backstop for whatever the supervision tick
+             * above does not anticipate. */
+            publish_occupancy();
             break;
         case APP_EVT_ZB_JOINED:
             handle_joined();
@@ -338,8 +403,14 @@ void app_main(void)
     ESP_ERROR_CHECK(s_events != NULL ? ESP_OK : ESP_ERR_NO_MEM);
 
     ESP_ERROR_CHECK(timer_create(&s_hold_timer, APP_EVT_HOLD_EXPIRED, "hold"));
+    ESP_ERROR_CHECK(timer_create(&s_supervise_timer, APP_EVT_SUPERVISE, "supervise"));
     ESP_ERROR_CHECK(timer_create(&s_heartbeat_timer, APP_EVT_HEARTBEAT, "heartbeat"));
     ESP_ERROR_CHECK(timer_create(&s_reset_timer, APP_EVT_RESET_HOLD_ELAPSED, "reset"));
+
+    /* Started here rather than on join: an occupancy report that fails because
+     * we are not on a network yet is exactly one of the cases it has to retry. */
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_supervise_timer,
+                                             (uint64_t)OCCUPANCY_SUPERVISE_S * 1000000ULL));
 
     ESP_ERROR_CHECK(board_io_init(s_events));
     ESP_ERROR_CHECK(battery_init());
@@ -359,6 +430,7 @@ void app_main(void)
                         ? ESP_OK
                         : ESP_ERR_NO_MEM);
 
-    ESP_LOGI(TAG, "started: hold %" PRIu32 " s, heartbeat %u s, model %s",
-             settings_get_hold_s(), (unsigned)HEARTBEAT_S, ZB_MODEL_IDENTIFIER);
+    ESP_LOGI(TAG, "started: hold %" PRIu32 " s, supervise %u s, heartbeat %u s, model %s",
+             settings_get_hold_s(), (unsigned)OCCUPANCY_SUPERVISE_S, (unsigned)HEARTBEAT_S,
+             ZB_MODEL_IDENTIFIER);
 }

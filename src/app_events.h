@@ -16,6 +16,7 @@ typedef enum {
     APP_EVT_BUTTON_CHANGED,     /* uses level_asserted: true = pressed        */
     APP_EVT_HOLD_EXPIRED,       /* occupancy hold timer fired                 */
     APP_EVT_RESET_HOLD_ELAPSED, /* button was held for RESET_HOLD_S           */
+    APP_EVT_SUPERVISE,          /* periodic: retry failed / force stuck clear */
     APP_EVT_HEARTBEAT,          /* periodic battery + keepalive report        */
     APP_EVT_ZB_JOINED,          /* stack reports the device is on a network   */
     APP_EVT_ZB_HOLD_SETPOINT,   /* uses setpoint: z2m wrote a new hold value  */

@@ -34,6 +34,22 @@
  * sensor would stay "occupied" until the battery ran out. */
 #define OCCUPANCY_MAX_HOLD_S        180U
 
+/* Supervision tick, independent of the hold timer.
+ *
+ * Occupancy lives in exactly two places - here and in the coordinator - and
+ * nothing reconciles them: set_occupancy() dedupes, so a state that is wrong on
+ * one side stays wrong until the next real transition. A 47-minute false
+ * "occupied" was traced to that (2026-09-04; the device stayed joined and
+ * reachable throughout, so no clear was ever generated or delivered).
+ *
+ * This tick is the reconciliation, and it covers what the hold timer cannot:
+ * it re-sends a report that failed, and it force-clears an occupancy that has
+ * outlived OCCUPANCY_MAX_HOLD_S even when the hold timer never fired at all.
+ * The stack already wakes the SoC every ZB_ED_KEEPALIVE_MS to poll the parent,
+ * so a 30 s alarm costs no measurable battery, and it only transmits when
+ * something is actually wrong. */
+#define OCCUPANCY_SUPERVISE_S       30U
+
 #define HEARTBEAT_S                 (60U * 60U) /* battery + keepalive report period */
 #define RESET_HOLD_S                5U          /* button hold to factory reset      */
 

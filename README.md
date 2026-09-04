@@ -43,7 +43,8 @@ application state lives on one thread and needs no locking.
         board_io ├──────────────┐
                  │              │
    esp_timer ────┤ hold         ├──►  s_events queue  ──►  app_task
-   alarms        │ heartbeat    │                            │
+   alarms        │ supervise    │                            │
+                 │ heartbeat    │                            │
                  │ reset-hold   │                            │
                  │              │                            ▼
         zb_sensor├──────────────┘                    set_occupancy()
@@ -93,6 +94,42 @@ Two related sdkconfig points:
 - `CONFIG_PM_SLP_DISABLE_GPIO` is on by default and parks every pad during
   sleep; `gpio_sleep_sel_dis()` is the documented opt-out, applied to the PIR,
   the button and the LED.
+
+---
+
+## The other subtle part: occupancy lives in two places
+
+Keeping RAM across sleep bought fast reports, but it also introduced a problem
+deep sleep did not have. The sketch rebooted on every wake and re-reported
+occupancy unconditionally each time — including on no-motion heartbeat wakes —
+so the coordinator was re-synchronised roughly hourly for free. This port holds
+the state in RAM and `set_occupancy()` deduplicates, so a single report that
+fails to leave the device desynchronises the coordinator **permanently**: the
+device never repeats itself, and z2m has nothing to correct it with.
+
+That is not hypothetical. On 2026-09-04 the sensor reported occupied at
+07:20:13Z and z2m did not see a clear until 08:07:53Z — 47 minutes, against a
+3 s hold and a 180 s ceiling — while staying joined, reachable and delivering
+its heartbeat throughout. Only the next physical motion repaired it, because
+`extend_hold()` runs on every PIR edge regardless of the dedupe.
+
+Three mechanisms now reconcile the two copies:
+
+| when | what | covers |
+|---|---|---|
+| on every report | `publish_occupancy()` records failure in `s_occupancy_unreported` | a report that never left the radio |
+| every `OCCUPANCY_SUPERVISE_S` | retry an unreported state; force-clear occupancy older than `OCCUPANCY_MAX_HOLD_S` | a hold timer that never fired |
+| every `HEARTBEAT_S` | unconditional re-publish, bypassing the dedupe | everything else |
+
+The force-clear deliberately does **not** live in the hold-timer callback.
+`handle_hold_expired()` enforces the same 180 s ceiling, but only when the hold
+timer fires — which is exactly the assumption that fails when the state is
+stuck. A guard inside the mechanism it guards is not a safety net.
+
+`zb_sensor.c` supports this by returning `ESP_ERR_INVALID_STATE` rather than
+`ESP_OK` when a report is skipped because the device is not joined. Reporting
+success for something that was never transmitted is what made the failure
+invisible in the first place.
 
 ---
 

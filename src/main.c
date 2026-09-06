@@ -61,6 +61,10 @@ static esp_timer_handle_t s_reset_timer;      /* button held long enough    */
 
 static bool    s_occupied;
 static int64_t s_occupied_since_us;
+/* When the hold is currently due to end. The queued APP_EVT_HOLD_EXPIRED is not
+ * self-describing, so this is what tells a stale one from a real one - see
+ * handle_hold_expired(). */
+static int64_t s_hold_deadline_us;
 /* Set when an occupancy report did not make it out. The coordinator is the only
  * place this state is visible to anyone, so a dropped report has to be retried
  * rather than logged and forgotten - see handle_supervise(). */
@@ -143,7 +147,10 @@ static void set_occupancy(bool occupied)
 
 static void extend_hold(void)
 {
-    timer_restart_once(s_hold_timer, (uint64_t)settings_get_hold_s() * 1000000ULL);
+    const uint64_t hold_us = (uint64_t)settings_get_hold_s() * 1000000ULL;
+
+    s_hold_deadline_us = esp_timer_get_time() + (int64_t)hold_us;
+    timer_restart_once(s_hold_timer, hold_us);
 }
 
 static void handle_pir_changed(bool motion)
@@ -167,6 +174,16 @@ static bool occupancy_outlived_max_hold(void)
 static void handle_hold_expired(void)
 {
     if (!s_occupied) {
+        return;
+    }
+
+    /* The event carries no timestamp, so a HOLD_EXPIRED that was already sitting
+     * in the queue when a PIR edge ran extend_hold() would otherwise clear an
+     * occupancy that had just been prolonged - the classic lost-extension race.
+     * The deadline moved, so this event is stale: drop it and let the re-armed
+     * timer deliver the real one. esp_timer never fires early (light sleep only
+     * ever makes it late), so a legitimate expiry always passes this test. */
+    if (esp_timer_get_time() < s_hold_deadline_us) {
         return;
     }
 

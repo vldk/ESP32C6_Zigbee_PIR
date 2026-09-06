@@ -95,11 +95,26 @@
                      └── sleep ────────────────┴── sleep ───┐
                                                             │
                                 hold_s elapsed, no new motion▼
-                                          handle_hold_expired()   main.c:130
+                                          handle_hold_expired()   main.c
+                                            now < s_hold_deadline_us?
+                                              yes → stale event, drop it
                                             motion still asserted?
                                               yes & < 180 s → extend
                                               else → set_occupancy(false)
                                                       LED off, report clear
+
+  The staleness check is what makes the extension reliable. APP_EVT_HOLD_EXPIRED
+  carries no timestamp, so an expiry already sitting in the queue when a PIR edge
+  runs extend_hold() would clear an occupancy that had just been prolonged:
+
+      [timer]  hold fires ──► queue HOLD_EXPIRED
+      [ISR]    PIR edge   ──► queue PIR_CHANGED        (behind it)
+      [app]    PIR_CHANGED  → extend_hold(), deadline moves out
+      [app]    HOLD_EXPIRED → stale! now < deadline → dropped
+
+  extend_hold() records the deadline alongside arming the timer, and esp_timer
+  never fires early - light sleep only ever makes it late - so a legitimate
+  expiry always satisfies now >= deadline.
 
   The level-follower underneath it — the reason edges are never lost across a
   sleep:

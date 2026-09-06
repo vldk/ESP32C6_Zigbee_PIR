@@ -109,9 +109,9 @@ device never repeats itself, and z2m has nothing to correct it with.
 
 That is not hypothetical. On 2026-09-04 the sensor reported occupied at
 07:20:13Z and z2m did not see a clear until 08:07:53Z — 47 minutes, against a
-3 s hold and a 180 s ceiling — while staying joined, reachable and delivering
-its heartbeat throughout. Only the next physical motion repaired it, because
-`extend_hold()` runs on every PIR edge regardless of the dedupe.
+hold of a few seconds and a 180 s ceiling — while staying joined, reachable and
+delivering its heartbeat throughout. Only the next physical motion repaired it,
+because `extend_hold()` runs on every PIR edge regardless of the dedupe.
 
 Three mechanisms now reconcile the two copies:
 
@@ -195,8 +195,20 @@ generated. After editing it, delete `sdkconfig.seeed_xiao_esp32c6` and rebuild.
 table itself and ignores the sdkconfig value. Without it the build silently
 falls back to the single-app table and the stack loses `zb_storage`/`zb_fct`.
 
-### Battery measurements
+### Logging
 
-Logging over USB-Serial-JTAG keeps that peripheral alive and dominates the
-sleep current. For a real consumption figure, set
-`CONFIG_LOG_DEFAULT_LEVEL_NONE=y` and run the board off the battery.
+The runtime log level is `CONFIG_LOG_DEFAULT_LEVEL_NONE`, so the firmware is
+silent by default: logging over USB-Serial-JTAG keeps that peripheral alive and
+dominates the sleep current, and every log call also lengthens the wake it
+happens in.
+
+`CONFIG_LOG_MAXIMUM_LEVEL_INFO` is kept, so the strings stay linked (~200 B of
+flash) and `esp_log_level_set()` can raise the level at runtime. Note there is
+no console or shell on this device to call it from — in practice, getting logs
+back means rebuilding with `CONFIG_LOG_DEFAULT_LEVEL_INFO=y`, deleting
+`sdkconfig.seeed_xiao_esp32c6` and reflashing. Set
+`CONFIG_LOG_MAXIMUM_LEVEL_NONE=y` as well if you want the strings gone
+entirely and will never re-enable them.
+
+The two lines worth watching when diagnosing an occupancy desync are
+`occupancy -> clear` and `re-sending unreported occupancy state`.

@@ -33,8 +33,15 @@ export default {
         // collected on the sensor's next poll. The `reporting` block BINDS genAnalogOutput
         // the same way as voltage above, so the firmware's echo (the accepted, clamped
         // value) lands back in z2m and confirms the setting.
+        // NOT named `occupancy_timeout`: that is a reserved zigbee2mqtt *device
+        // option* (the one fz.occupancy_with_timeout reads to decide how long z2m
+        // itself should hold occupancy on). Exposing a device attribute under the
+        // same name makes the payload ambiguous - a reader cannot tell whether
+        // `occupancy_timeout` is this sensor's hold setpoint or z2m's own timeout,
+        // and the two mean different things. `occupancy_hold` matches the wording
+        // the firmware and the AnalogOutput Description attribute already use.
         numeric({
-            name: 'occupancy_timeout',
+            name: 'occupancy_hold',
             cluster: 'genAnalogOutput',
             attribute: 'presentValue',
             description:

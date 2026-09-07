@@ -7,6 +7,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_zigbee_core.h"
+#include "nwk/esp_zigbee_nwk.h"
 #include "freertos/task.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl/esp_zigbee_zcl_power_config.h"
@@ -318,6 +319,33 @@ static void announce_joined(void)
     post_event(&evt);
 }
 
+/*
+ * The counterpart to announce_joined(), and the reason it exists.
+ *
+ * s_joined used to be a one-way latch: only a formal ESP_ZB_ZDO_SIGNAL_LEAVE
+ * cleared it. A parent that simply stops answering - a rebooted router, a
+ * restarted coordinator, an RF drop - never sends one, so the flag stayed true
+ * forever. That matters because esp_zb_zcl_report_attr_cmd_req() only queues a
+ * frame: it returns ESP_OK whether or not anything is still listening. Every
+ * report therefore "succeeded", s_occupancy_unreported stayed false, the
+ * supervision retry never fired, and the device kept reporting into the void
+ * until someone noticed it had been missing for hours.
+ */
+static void announce_left(const char *why)
+{
+    if (!s_joined) {
+        return;
+    }
+    s_joined = false;
+
+    ESP_LOGW(TAG, "network link lost (%s), restarting steering", why);
+
+    const app_event_t evt = { .id = APP_EVT_ZB_LEFT };
+    post_event(&evt);
+
+    esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+}
+
 /* Called from the stack task; the SDK declares it, the application defines it. */
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
@@ -360,9 +388,28 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         break;
 
     case ESP_ZB_ZDO_SIGNAL_LEAVE:
-        ESP_LOGW(TAG, "left the network");
-        s_joined = false;
+        announce_left("leave");
         break;
+
+    /* The coordinator or a parent told us to go. */
+    case ESP_ZB_ZDO_SIGNAL_LEAVE_INDICATION:
+        announce_left("leave indication");
+        break;
+
+    /* The only notification a sleepy end device gets that its parent has gone
+     * away without saying so. Everything else in this file assumes the link is
+     * up, so this is where that assumption is allowed to be withdrawn. */
+    case ESP_ZB_NLME_STATUS_INDICATION: {
+        const esp_zb_zdo_signal_nwk_status_indication_params_t *params =
+            (const esp_zb_zdo_signal_nwk_status_indication_params_t *)
+                esp_zb_app_signal_get_params(signal_struct->p_app_signal);
+
+        if (params != NULL &&
+            params->status == ESP_ZB_NWK_COMMAND_STATUS_PARENT_LINK_FAILURE) {
+            announce_left("parent link failure");
+        }
+        break;
+    }
 
     /*
      * THE light-sleep hook, and the reason this port exists. The stack raises

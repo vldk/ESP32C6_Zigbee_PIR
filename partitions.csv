@@ -7,3 +7,6 @@ phy_init,   data, phy,      0xf000,   0x1000,
 factory,    app,  factory,  0x10000,  1500K,
 zb_storage, data, fat,      ,         16K,
 zb_fct,     data, fat,      ,         1K,
+# Written by the panic handler, read back with `idf.py coredump-info`. Added
+# after a silent 17 h outage (2026-09-07) that left nothing to diagnose.
+coredump,   data, coredump, ,         64K,

@@ -51,6 +51,16 @@
 #define OCCUPANCY_SUPERVISE_S       30U
 
 #define HEARTBEAT_S                 (60U * 60U) /* battery + keepalive report period */
+
+/* How long the device tolerates having no network before rebooting itself.
+ *
+ * Network steering retries on its own, but a stack that has wedged its radio
+ * state retries forever without ever getting back on. A reboot re-commissions
+ * from the NVS dataset in a few seconds, so the trade is a handful of seconds
+ * of downtime against the alternative that actually happened: a device sitting
+ * silent for 17 hours (2026-09-07) with nothing able to recover it. Comfortably
+ * longer than a coordinator restart so a routine bounce does not trip it. */
+#define ZB_RELINK_REBOOT_S          (15U * 60U)
 #define RESET_HOLD_S                5U          /* button hold to factory reset      */
 
 /* ---------------- Battery divider --------------------------------------- */

@@ -19,6 +19,7 @@ typedef enum {
     APP_EVT_SUPERVISE,          /* periodic: retry failed / force stuck clear */
     APP_EVT_HEARTBEAT,          /* periodic battery + keepalive report        */
     APP_EVT_ZB_JOINED,          /* stack reports the device is on a network   */
+    APP_EVT_ZB_LEFT,            /* stack lost the network (leave or link fail)*/
     APP_EVT_ZB_HOLD_SETPOINT,   /* uses setpoint: z2m wrote a new hold value  */
 } app_event_id_t;
 

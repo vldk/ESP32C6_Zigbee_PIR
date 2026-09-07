@@ -38,6 +38,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -69,6 +70,11 @@ static int64_t s_hold_deadline_us;
  * place this state is visible to anyone, so a dropped report has to be retried
  * rather than logged and forgotten - see handle_supervise(). */
 static bool    s_occupancy_unreported;
+/* 0 while the device has a network. Otherwise when it lost one, which is what
+ * lets handle_supervise() tell a rejoin that is in progress from one that is
+ * never going to finish. Armed only after a first successful join, so pairing a
+ * factory-new device is never interrupted by the reboot below. */
+static int64_t s_link_down_since_us;
 
 /* ------------------------------------------------------------------ timers */
 
@@ -227,6 +233,30 @@ static void handle_supervise(void)
                  s_occupied ? "occupied" : "clear");
         publish_occupancy();
     }
+
+    /* (3) A network that has been gone long enough that the stack is plainly not
+     * getting it back. Everything above is a no-op while there is no parent to
+     * report to, so this is the rung that actually restores service. Last,
+     * because a reboot discards the local state the first two rungs just fixed
+     * and the occupied LED is worth clearing on the way out. */
+    if (s_link_down_since_us != 0 &&
+        (esp_timer_get_time() - s_link_down_since_us) >=
+            (int64_t)ZB_RELINK_REBOOT_S * 1000000LL) {
+        ESP_LOGE(TAG, "no network for over %u s, rebooting to re-commission",
+                 (unsigned)ZB_RELINK_REBOOT_S);
+        board_io_led_set(false);
+        esp_restart();
+    }
+}
+
+/* The stack lost the network. zb_sensor.c has already kicked off fresh steering;
+ * all that is needed here is to start the clock that bounds how long it may
+ * keep failing. */
+static void handle_zb_left(void)
+{
+    if (s_link_down_since_us == 0) {
+        s_link_down_since_us = esp_timer_get_time();
+    }
 }
 
 /* ----------------------------------------------------------------- button */
@@ -277,6 +307,8 @@ static void report_battery(void)
 
 static void handle_joined(void)
 {
+    s_link_down_since_us = 0;
+
     report_battery();
 
     const esp_err_t err = zb_sensor_report_hold_setpoint(settings_get_hold_s());
@@ -363,6 +395,9 @@ static void app_task(void *arg)
             break;
         case APP_EVT_ZB_JOINED:
             handle_joined();
+            break;
+        case APP_EVT_ZB_LEFT:
+            handle_zb_left();
             break;
         case APP_EVT_ZB_HOLD_SETPOINT:
             handle_hold_setpoint(evt.setpoint);

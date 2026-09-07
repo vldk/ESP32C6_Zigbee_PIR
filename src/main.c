@@ -145,7 +145,6 @@ static void set_occupancy(bool occupied)
         s_occupied_since_us = esp_timer_get_time();
     }
 
-    board_io_led_set(occupied);
     ESP_LOGI(TAG, "occupancy -> %s", occupied ? "occupied" : "clear");
 
     publish_occupancy();
@@ -162,6 +161,14 @@ static void extend_hold(void)
 static void handle_pir_changed(bool motion)
 {
     ESP_ERROR_CHECK_WITHOUT_ABORT(board_io_rearm(BOARD_INPUT_PIR));
+
+    /* The LED tracks the PIR line, not the occupancy it produces: it answers
+     * "is the sensor seeing something right now?", which is the question worth
+     * asking when aiming the lens or checking the AM312 still works. Occupancy
+     * deliberately outlives the pulse by hold_s - the LED deliberately does
+     * not, so the two are read independently. board_io_led_blink() is
+     * unaffected and still owns the start-up and factory-reset signalling. */
+    board_io_led_set(motion);
 
     if (motion) {
         set_occupancy(true);
@@ -237,14 +244,14 @@ static void handle_supervise(void)
     /* (3) A network that has been gone long enough that the stack is plainly not
      * getting it back. Everything above is a no-op while there is no parent to
      * report to, so this is the rung that actually restores service. Last,
-     * because a reboot discards the local state the first two rungs just fixed
-     * and the occupied LED is worth clearing on the way out. */
+     * because a reboot discards the local state the first two rungs just fixed.
+     * The LED needs no attention: board_io_init() drives it low on the way back
+     * up, and app_task() re-lights it if the line is still asserted. */
     if (s_link_down_since_us != 0 &&
         (esp_timer_get_time() - s_link_down_since_us) >=
             (int64_t)ZB_RELINK_REBOOT_S * 1000000LL) {
         ESP_LOGE(TAG, "no network for over %u s, rebooting to re-commission",
                  (unsigned)ZB_RELINK_REBOOT_S);
-        board_io_led_set(false);
         esp_restart();
     }
 }
@@ -361,6 +368,10 @@ static void app_task(void *arg)
      * original sketch made the same call for a GPIO deep-sleep wake. */
     if (board_io_motion_active()) {
         ESP_LOGI(TAG, "PIR asserted at start-up");
+        /* Seeded here rather than by set_occupancy(): the two blinks in
+         * app_main() leave the LED off, and nothing else lights it until the
+         * next PIR edge - which a line that is already asserted will not give. */
+        board_io_led_set(true);
         set_occupancy(true);
         extend_hold();
     }

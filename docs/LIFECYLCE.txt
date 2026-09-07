@@ -87,10 +87,10 @@
                      │           │
    [app]      handle_pir_changed(true)   handle_pir_changed(false)
                rearm → watch HIGH         rearm → watch LOW
+               LED on                     LED off
                set_occupancy(true)        (no state change)
-                 LED on                    ↑ hold measured from the
-                 ZCL report ──► z2m          *trailing* edge
-               extend_hold()              extend_hold()
+                 ZCL report ──► z2m        ↑ hold measured from the
+               extend_hold()              extend_hold()  *trailing* edge
                      │                         │
                      └── sleep ────────────────┴── sleep ───┐
                                                             │
@@ -101,7 +101,13 @@
                                             motion still asserted?
                                               yes & < 180 s → extend
                                               else → set_occupancy(false)
-                                                      LED off, report clear
+                                                      report clear (LED already
+                                                      went out with the pulse)
+
+  The LED is deliberately not part of this. It follows the PIR line and goes out
+  with the AM312 pulse, seconds into a hold that may run for minutes: it reports
+  "the sensor sees something now", while occupancy reports "the room is in use".
+  Only board_io_led_blink() overrides it, for start-up and factory reset.
 
   The staleness check is what makes the extension reliable. APP_EVT_HOLD_EXPIRED
   carries no timestamp, so an expiry already sitting in the queue when a PIR edge

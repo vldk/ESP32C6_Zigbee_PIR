@@ -121,10 +121,11 @@ esp_err_t board_io_init(QueueHandle_t event_sink)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&led_cfg), TAG, "LED GPIO%d: config failed", PIN_LED);
 
-    /* Same opt-out as the inputs, for the opposite reason: the LED marks the
-     * occupied state for as long as the hold lasts, and the device light-sleeps
-     * right through that. Left parked, the pad would drop and the indicator
-     * would stutter instead of staying lit. */
+    /* Same opt-out as the inputs, for the opposite reason: the LED is lit for as
+     * long as the PIR line is asserted, and the device light-sleeps well within
+     * that - an AM312 pulse outlasts the idle threshold many times over. Left
+     * parked, the pad would drop and the indicator would stutter through the
+     * pulse instead of staying lit. */
     ESP_RETURN_ON_ERROR(gpio_sleep_sel_dis(PIN_LED), TAG,
                         "LED GPIO%d: cannot keep pad driven during sleep", PIN_LED);
     board_io_led_set(false);
